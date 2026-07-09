@@ -2,4 +2,4 @@ QR_Content: https://www.dungeon-lab.com/app-download.php#DGLAB-SOCKET#wss://ws.d
 Channel_A_limit: 50
 Channel_B_limit: 50
 Wave_convert_ratio: 5
-Debug: True
+Debug: true

@@ -1,0 +1,7 @@
+{
+  "default": "en",
+  "locales": [
+    { "code": "en", "label": "EN", "file": "en.json" },
+    { "code": "zh", "label": "中文", "file": "zh.json" }
+  ]
+}

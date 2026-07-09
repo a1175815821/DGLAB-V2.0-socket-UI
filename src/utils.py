@@ -1,53 +1,79 @@
-from model import *
-from PIL import ImageGrab
+from io import BytesIO
+
+from PIL import Image, ImageGrab
 from pyzbar.pyzbar import decode
 
-import yaml, logging
-
-with open("./config.yaml") as stream:
-    try:
-        config = yaml.safe_load(stream)
-        Wave_convert_ratio = int(config["Wave_convert_ratio"])
-    except yaml.YAMLError as exc:
-        logging.error(exc)
+import logging
 
 
-def convert_to_waveset(strength: int, freq: int) -> tuple[int, int, int]:
-    ms_per_wave = 1000 / freq
-    X = int(ms_per_wave / Wave_convert_ratio)
-    Y = int(ms_per_wave - X)
-    Z = int(strength / 5)
-    return X, Y, Z
+def convert_to_waveset(strength: int, freq: int, wave_convert_ratio: int = 5) -> tuple[int, int, int]:
+    ms_per_wave = 1000 / max(freq, 1)
+    x = int(ms_per_wave / max(wave_convert_ratio, 1))
+    y = int(ms_per_wave - x)
+    z = int(strength / 5)
+    return x, y, z
 
 
-def dglab_wave_handler(
-    store: local_data, wave: list[(tuple[int, int, int])], channel: str
-):
+def dglab_wave_handler(store, wave: list, channel: str, wave_convert_ratio: int = 5):
     waveset = []
     for i in wave:
-        # 对每组波形进行切分，以1:4比例丢弃后3/4
         freq = int(i[0:2], 16)
         strength = int(i[8:10], 16)
-        waveset.append(convert_to_waveset(strength, freq))
+        waveset.append(convert_to_waveset(strength, freq, wave_convert_ratio))
     if channel == "A":
         store.channelAWave = waveset
     elif channel == "B":
         store.channelBWave = waveset
-    return
+
 
 def decode_qr_code(image):
     decoded_objects = decode(image)
-    qr_data = [obj.data.decode('utf-8') for obj in decoded_objects]
-    return qr_data
+    return [obj.data.decode("utf-8") for obj in decoded_objects]
 
-def find_qr_code():
-    qrcodes = decode_qr_code(ImageGrab.grab())
-    if len(qrcodes) < 1:
+
+def pick_ws_qr(qrcodes: list[str]) -> str:
+    if not qrcodes:
         return ""
-    qrcode = ""
-    for i in range(len(qrcodes)):
-        if qrcodes[i].find("wss://") != -1 or qrcodes[i].find("ws://") != -1:
-            qrcode = qrcodes[i]
-            break
-    
-    return qrcode
+    for code in qrcodes:
+        if "wss://" in code or "ws://" in code:
+            return code
+    return qrcodes[0] if qrcodes else ""
+
+
+def find_qr_code() -> str:
+    try:
+        qrcodes = decode_qr_code(ImageGrab.grab())
+    except Exception as e:
+        logging.error(f"QR scan failed: {e}")
+        return ""
+    return pick_ws_qr(qrcodes)
+
+
+def decode_qr_from_bytes(data: bytes) -> str:
+    try:
+        image = Image.open(BytesIO(data))
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        return pick_ws_qr(decode_qr_code(image))
+    except Exception as e:
+        logging.error(f"QR image decode failed: {e}")
+        return ""
+
+
+def parse_qr_content(qr_raw: str) -> tuple[str, str]:
+    """Return (ws_url, client_id) from DGLAB QR content."""
+    qr_raw = (qr_raw or "").strip()
+    if not qr_raw:
+        return "", ""
+
+    marker = "#DGLAB-SOCKET#"
+    if marker in qr_raw:
+        ws_url = qr_raw.split(marker, 1)[1]
+        client_id = ws_url.rsplit("/", 1)[-1]
+        return ws_url, client_id
+
+    if qr_raw.startswith("ws://") or qr_raw.startswith("wss://"):
+        client_id = qr_raw.rsplit("/", 1)[-1]
+        return qr_raw, client_id
+
+    return "", ""

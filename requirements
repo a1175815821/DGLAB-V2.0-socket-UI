@@ -4,3 +4,6 @@ pyyaml
 pillow
 pyzbar
 rich
+fastapi
+uvicorn
+python-multipart
