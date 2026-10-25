@@ -78,6 +78,10 @@
   "log.ws_bad_message": "无效 WS 消息：{error}",
   "log.ws_bound": "WS 绑定成功",
   "log.bind_error": "绑定错误：{error}",
+  "log.app_sync": "App 同步强度：A={strengthA} B={strengthB} · 上限 {limitA}/{limitB}",
+  "log.app_feedback": "收到 App 反馈按钮：{code}",
+  "log.peer_broken": "App 端已断开绑定，等待重新绑定",
+  "log.ws_handler_error": "消息处理出错：{error}",
 
   "error.peer_disconnected": "对方客户端已断开",
   "error.invalid_client_id": "二维码中没有有效的 clientID",
@@ -95,6 +99,8 @@
   "error.image_too_large": "图片过大（最大 12MB）",
   "error.not_image": "不是图片文件",
   "error.channel": "通道必须是 A 或 B",
+  "error.wave_invalid": "波形参数无效（需要 X ≥ 1，Y、Z ≥ 0）",
+  "error.cross_origin": "跨站请求已被拒绝",
   "error.frontend_missing": "未找到前端页面",
   "error.connect_failed": "连接失败"
 }

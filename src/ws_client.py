@@ -5,8 +5,8 @@ from typing import Optional
 
 import websocket
 
-from handler import bind, break_, error, heartbeat, msg, response, strength_upload
-from model import AppState, dglab_message, local_data
+from handler import bind, error, heartbeat, msg, strength_upload
+from model import AppState, dglab_message
 from utils import parse_qr_content
 
 logger = logging.getLogger(__name__)
@@ -15,10 +15,8 @@ logger = logging.getLogger(__name__)
 class WSClientService:
     def __init__(self, state: AppState):
         self.state = state
-        self.store = local_data(state)
         self._ws: Optional[websocket.WebSocketApp] = None
         self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
 
     def connect(self, qr_content: str = "") -> dict:
         raw = (qr_content or self.state.qr_content or "").strip()
@@ -36,58 +34,86 @@ class WSClientService:
         self.state.last_error = ""
         self.state.push_log("log.ws_connecting", {"url": ws_url})
 
-        self._stop.clear()
-        self._ws = websocket.WebSocketApp(
+        app = websocket.WebSocketApp(
             ws_url,
             on_open=self._on_open,
             on_message=self._on_message,
             on_error=self._on_error,
             on_close=self._on_close,
         )
-        self._thread = threading.Thread(target=self._run, daemon=True, name="ws-client")
+        self._ws = app
+        self._thread = threading.Thread(
+            target=self._run, args=(app,), daemon=True, name="ws-client"
+        )
         self._thread.start()
         return {"ok": True, "wsUrl": ws_url, "clientId": client_id}
 
     def disconnect(self) -> None:
-        self._stop.set()
-        if self._ws:
+        app = self._ws
+        self._ws = None
+        if app is not None:
             try:
-                self._ws.close()
+                app.close()
             except Exception:
                 pass
-        self._ws = None
+        was_active = self.state.ws_connected or self.state.ws_bound
         self.state.ws_connected = False
         self.state.ws_bound = False
-        self.state.push_log("log.ws_disconnected")
+        if was_active:
+            self.state.push_log("log.ws_disconnected")
 
-    def _run(self) -> None:
-        assert self._ws is not None
+    def send_strength_feedback(self) -> None:
+        """Push current strengths/limits to the app (order: A+B+limitA+limitB)."""
+        state = self.state
+        ws = self._ws
+        if not state.ws_connected or ws is None:
+            return
+        payload = (
+            f"strength-{state.strength_a}+{state.strength_b}"
+            f"+{state.limit_a}+{state.limit_b}"
+        )
         try:
-            self._ws.run_forever(reconnect=5)
+            strength_upload(ws, payload, state)
+        except Exception as e:
+            logger.debug("Strength feedback failed: %s", e)
+
+    def _run(self, app: websocket.WebSocketApp) -> None:
+        try:
+            app.run_forever(reconnect=5)
         except Exception as e:
             logger.exception("WS run failed")
-            self.state.last_error = str(e)
-            self.state.push_log("log.ws_error", {"error": str(e)})
+            if app is self._ws:
+                self.state.last_error = str(e)
+                self.state.push_log("log.ws_error", {"error": str(e)})
         finally:
-            self.state.ws_connected = False
+            if app is self._ws:
+                self.state.ws_connected = False
 
     def _on_open(self, ws):
+        if ws is not self._ws:
+            return
         self.state.ws_connected = True
         self.state.push_log("log.ws_connected")
         logger.info("WS connection opened")
 
     def _on_close(self, ws, close_status_code, close_msg):
+        if ws is not self._ws:
+            return
         self.state.ws_connected = False
         self.state.ws_bound = False
         self.state.push_log("log.ws_closed", {"code": close_status_code})
         logger.info("WS connection closed")
 
     def _on_error(self, ws, err):
+        if ws is not self._ws:
+            return
         self.state.last_error = str(err)
         self.state.push_log("log.ws_error", {"error": str(err)})
         logger.error(err)
 
     def _on_message(self, ws, message_raw):
+        if ws is not self._ws:
+            return
         logger.debug("Received message: %s", message_raw)
         try:
             data = json.loads(message_raw)
@@ -101,29 +127,26 @@ class WSClientService:
             self.state.push_log("log.ws_bad_message", {"error": str(e)})
             return
 
-        if message.type_ == "heartbeat":
-            heartbeat(ws, message, self.store)
-            return
-        if message.type_ == "bind":
-            bind(ws, message, self.store)
-            strength_upload(
-                ws,
-                f"strength-0+0+{self.state.limit_b}+{self.state.limit_a}",
-                store=self.store,
-            )
-            return
-        if message.type_ == "msg":
-            msg(ws, message, self.store)
-            strength_upload(
-                ws,
-                f"strength-{self.state.strength_a}+{self.state.strength_b}+{self.state.limit_b}+{self.state.limit_a}",
-                store=self.store,
-            )
-            response(ws, "feedback-0", self.store)
-            return
-        if message.type_ == "break":
-            break_(ws, message)
-            return
-        if message.type_ == "error":
-            error(ws, message)
-            return
+        try:
+            if message.type_ == "heartbeat":
+                heartbeat(ws, message, self.state)
+            elif message.type_ == "bind":
+                bind(ws, message, self.state)
+                if self.state.ws_bound:
+                    self.send_strength_feedback()
+            elif message.type_ == "msg":
+                changed = msg(ws, message, self.state)
+                if changed:
+                    self.send_strength_feedback()
+            elif message.type_ == "break":
+                # Peer unbound; keep the socket and wait for a new bind.
+                if self.state.ws_bound or self.state.target_id:
+                    self.state.ws_bound = False
+                    self.state.target_id = None
+                    self.state.push_log("log.peer_broken")
+            elif message.type_ == "error":
+                error(ws, message, self.state)
+        except Exception as e:
+            # A single malformed message must not tear down the connection.
+            logger.exception("WS message handler failed")
+            self.state.push_log("log.ws_handler_error", {"error": str(e)})

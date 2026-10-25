@@ -1,0 +1,7 @@
+# 复制为 config.yaml 后使用；面板「设置」保存后也会自动写回 config.yaml
+# QR_Content 为 DG-LAB App「SOCKET」二维码的内容，留空则需在面板手动填入
+QR_Content: ""
+Channel_A_limit: 50
+Channel_B_limit: 50
+Wave_convert_ratio: 5
+Debug: false

@@ -53,6 +53,18 @@ function setPill(el, text, mode) {
   el.className = "pill " + (mode || "off");
 }
 
+// Wrap async click/change handlers so server errors reach the error line
+// instead of becoming unhandled rejections.
+function guard(fn) {
+  return async (...args) => {
+    try {
+      await fn(...args);
+    } catch (e) {
+      ui.errLine.textContent = e.message;
+    }
+  };
+}
+
 function flash(el, cls = "flash") {
   if (!el) return;
   el.classList.remove(cls);
@@ -162,10 +174,10 @@ function bindSlider(slider, channel, valueEl) {
   slider.addEventListener("pointerdown", () => {
     dragging[channel] = true;
   });
-  slider.addEventListener("pointerup", async () => {
+  slider.addEventListener("pointerup", guard(async () => {
     dragging[channel] = false;
     await setStrength(channel, slider.value, "set");
-  });
+  }));
   slider.addEventListener("input", () => {
     valueEl.textContent = slider.value;
     if (lastStatus && scope) {
@@ -176,10 +188,10 @@ function bindSlider(slider, channel, valueEl) {
       });
     }
   });
-  slider.addEventListener("change", async () => {
+  slider.addEventListener("change", guard(async () => {
     dragging[channel] = false;
     await setStrength(channel, slider.value, "set");
-  });
+  }));
 }
 
 async function uploadQrImage(file) {
@@ -284,24 +296,24 @@ async function bootstrap() {
   bindDropzone();
 
   document.querySelectorAll("[data-delta]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", guard(async () => {
       const ch = btn.dataset.ch;
       const delta = Number(btn.dataset.delta);
       await setStrength(ch, Math.abs(delta), delta >= 0 ? "add" : "sub");
-    });
+    }));
   });
 
   document.querySelectorAll("[data-set]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", guard(async () => {
       await setStrength(btn.dataset.ch, Number(btn.dataset.set), "set");
-    });
+    }));
   });
 
-  $("btn-stop").addEventListener("click", async () => {
+  $("btn-stop").addEventListener("click", guard(async () => {
     const s = await api("/api/emergency-stop", { method: "POST", body: "{}" });
     renderStatus(s);
     flash($("btn-stop"), "flash");
-  });
+  }));
 
   ui.btnDeviceConnect.addEventListener("click", async () => {
     try {
@@ -347,10 +359,10 @@ async function bootstrap() {
     }
   });
 
-  $("btn-disconnect").addEventListener("click", async () => {
+  $("btn-disconnect").addEventListener("click", guard(async () => {
     const s = await api("/api/ws/disconnect", { method: "POST", body: "{}" });
     renderStatus(s);
-  });
+  }));
 
   $("btn-save").addEventListener("click", async () => {
     try {

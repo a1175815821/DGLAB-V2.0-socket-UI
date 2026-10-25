@@ -5,6 +5,8 @@ from pyzbar.pyzbar import decode
 
 import logging
 
+from model import AppState
+
 
 def convert_to_waveset(strength: int, freq: int, wave_convert_ratio: int = 5) -> tuple[int, int, int]:
     ms_per_wave = 1000 / max(freq, 1)
@@ -14,16 +16,16 @@ def convert_to_waveset(strength: int, freq: int, wave_convert_ratio: int = 5) ->
     return x, y, z
 
 
-def dglab_wave_handler(store, wave: list, channel: str, wave_convert_ratio: int = 5):
+def dglab_wave_handler(state: AppState, wave: list, channel: str, wave_convert_ratio: int = 5) -> None:
     waveset = []
     for i in wave:
         freq = int(i[0:2], 16)
         strength = int(i[8:10], 16)
         waveset.append(convert_to_waveset(strength, freq, wave_convert_ratio))
     if channel == "A":
-        store.channelAWave = waveset
+        state.wave_a = waveset
     elif channel == "B":
-        store.channelBWave = waveset
+        state.wave_b = waveset
 
 
 def decode_qr_code(image):

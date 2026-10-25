@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from device import DeviceService
-from model import AppState
+from model import DEFAULT_LIMIT, DEFAULT_WAVE, MAX_LIMIT, AppState
 from utils import decode_qr_from_bytes, find_qr_code
 from ws_client import WSClientService
 
@@ -35,8 +36,8 @@ def load_config() -> None:
     with open(CONFIG_PATH, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     state.qr_content = str(cfg.get("QR_Content") or "")
-    state.limit_a = int(cfg.get("Channel_A_limit", 50))
-    state.limit_b = int(cfg.get("Channel_B_limit", 50))
+    state.limit_a = int(cfg.get("Channel_A_limit", DEFAULT_LIMIT))
+    state.limit_b = int(cfg.get("Channel_B_limit", DEFAULT_LIMIT))
     state.wave_convert_ratio = int(cfg.get("Wave_convert_ratio", 5))
     state.debug = bool(cfg.get("Debug", False))
     if state.debug:
@@ -57,7 +58,33 @@ def save_config() -> None:
 
 load_config()
 
-app = FastAPI(title="DGLAB V2 Control", version="2.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    state.push_log("log.api_started")
+    yield
+    ws_service.disconnect()
+    device_service.stop()
+
+
+app = FastAPI(title="DGLAB V2 Control", version="2.1", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def same_origin_guard(request: Request, call_next):
+    """Block cross-site state-changing requests.
+
+    JSON endpoints are preflight-protected by CORS already, but the multipart
+    QR upload is a "simple request" a foreign page could fire without Origin
+    checks. Browsers always attach Origin to such requests, so reject any
+    Origin that does not match our own Host.
+    """
+    origin = request.headers.get("origin")
+    if origin:
+        host = request.headers.get("host", "")
+        allowed = {f"http://{host}", f"https://{host}"}
+        if origin not in allowed:
+            return JSONResponse({"detail": "error.cross_origin"}, status_code=403)
+    return await call_next(request)
 
 
 class StrengthBody(BaseModel):
@@ -86,17 +113,6 @@ class ConfigBody(BaseModel):
 class WaveBody(BaseModel):
     channel: str
     wave: list[list[int]]
-
-
-@app.on_event("startup")
-def on_startup():
-    state.push_log("log.api_started")
-
-
-@app.on_event("shutdown")
-def on_shutdown():
-    ws_service.disconnect()
-    device_service.stop()
 
 
 @app.get("/api/status")
@@ -130,6 +146,7 @@ def set_strength(body: StrengthBody):
         raise HTTPException(400, "error.channel")
     mode = body.mode if body.mode in ("set", "add", "sub") else "set"
     state.set_strength(ch, int(body.value), mode)
+    ws_service.send_strength_feedback()
     ch_name = ch if ch in ("A", "B") else ("A" if ch == "1" else "B")
     state.push_log(
         "log.strength",
@@ -147,11 +164,12 @@ def set_strength(body: StrengthBody):
 @app.post("/api/limits")
 def set_limits(body: LimitsBody):
     if body.limitA is not None:
-        state.limit_a = max(0, min(200, int(body.limitA)))
+        state.limit_a = max(0, min(MAX_LIMIT, int(body.limitA)))
     if body.limitB is not None:
-        state.limit_b = max(0, min(200, int(body.limitB)))
+        state.limit_b = max(0, min(MAX_LIMIT, int(body.limitB)))
     state.clamp_strength()
     save_config()
+    ws_service.send_strength_feedback()
     state.push_log("log.limits_set", {"limitA": state.limit_a, "limitB": state.limit_b})
     return state.snapshot()
 
@@ -159,9 +177,14 @@ def set_limits(body: LimitsBody):
 @app.post("/api/wave")
 def set_wave(body: WaveBody):
     ch = body.channel.upper()
-    waves = [tuple(int(x) for x in item[:3]) for item in body.wave]
+    waves = []
+    for item in body.wave[:128]:
+        x, y, z = (int(v) for v in item[:3])
+        if x < 1 or y < 0 or z < 0:
+            raise HTTPException(400, "error.wave_invalid")
+        waves.append((x, y, z))
     if not waves:
-        waves = [(5, 95, 20)]
+        waves = list(DEFAULT_WAVE)
     if ch in ("A", "1"):
         state.wave_a = waves
         ch_name = "A"
@@ -178,8 +201,9 @@ def set_wave(body: WaveBody):
 def emergency_stop():
     state.strength_a = 0
     state.strength_b = 0
-    state.wave_a = [(5, 95, 20)]
-    state.wave_b = [(5, 95, 20)]
+    state.wave_a = list(DEFAULT_WAVE)
+    state.wave_b = list(DEFAULT_WAVE)
+    ws_service.send_strength_feedback()
     state.push_log("log.emergency_stop")
     return state.snapshot()
 
@@ -240,9 +264,9 @@ def update_config(body: ConfigBody):
     if body.qrContent is not None:
         state.qr_content = body.qrContent
     if body.limitA is not None:
-        state.limit_a = max(0, min(200, int(body.limitA)))
+        state.limit_a = max(0, min(MAX_LIMIT, int(body.limitA)))
     if body.limitB is not None:
-        state.limit_b = max(0, min(200, int(body.limitB)))
+        state.limit_b = max(0, min(MAX_LIMIT, int(body.limitB)))
     if body.waveConvertRatio is not None:
         state.wave_convert_ratio = max(1, int(body.waveConvertRatio))
     if body.debug is not None:

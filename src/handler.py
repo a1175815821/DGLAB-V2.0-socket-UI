@@ -1,144 +1,141 @@
-from model import *
-from utils import dglab_wave_handler
-
-from websocket import WebSocketApp
 import json
 import logging
 
+from model import DEFAULT_WAVE, AppState, code, dglab_message
+from utils import dglab_wave_handler
 
 logger = logging.getLogger(__name__)
 
 
-def bind(client: WebSocketApp, message: dglab_message, store: local_data):
+def bind(client, message: dglab_message, state: AppState) -> None:
     if message.message == "targetId":
         logger.debug("Bind received")
-        store.targetId = message.clientId
-        reply = {
+        state.target_id = message.clientId
+        client.send(json.dumps({
             "type": "bind",
-            "clientId": store.clientId,
-            "targetId": store.targetId,
+            "clientId": state.client_id,
+            "targetId": state.target_id,
             "message": "DGLAB",
-        }
-        client.send(json.dumps(reply))
+        }))
     elif message.message == "200":
         logger.info("Bind to remote success")
-        if hasattr(store, "_state"):
-            store._state.ws_bound = True
-            store._state.push_log("log.ws_bound")
-    elif message.message.isdigit() and int(message.message) in code:
-        error_code = int(message.message)
-        err_key = code[error_code][0]
-        logger.error(err_key)
-        if hasattr(store, "_state"):
-            store._state.last_error = err_key
-            store._state.push_log("log.bind_error", {"error": err_key})
+        state.ws_bound = True
+        state.push_log("log.ws_bound")
+    elif str(message.message).isdigit() and int(message.message) in code:
+        err_key = code[int(message.message)][0]
+        logger.error("Bind error: %s", err_key)
+        state.last_error = err_key
+        state.push_log("log.bind_error", {"error": err_key})
 
 
-def heartbeat(client: WebSocketApp, message: dglab_message, store: local_data):
-    msg = int(message.message)
-    if msg == 200:
+def heartbeat(client, message: dglab_message, state: AppState) -> None:
+    try:
+        code_value = int(message.message)
+    except (TypeError, ValueError):
+        logger.warning("Unknown heartbeat message: %s", message.message)
+        return
+    if code_value == 200:
         logger.debug("Heartbeating...")
-        client.send(
-            json.dumps(
-                {
-                    "type": "heartbeat",
-                    "clientId": store.clientId,
-                    "targetId": store.targetId,
-                    "message": 200,
-                }
-            )
+        client.send(json.dumps({
+            "type": "heartbeat",
+            "clientId": state.client_id,
+            "targetId": state.target_id,
+            "message": 200,
+        }))
+        return
+    if code_value in code:
+        err_key = code[code_value][0]
+        logger.error("Heartbeat error: %s", err_key)
+        state.last_error = err_key
+        return
+    logger.warning("Unknown heartbeat message: %s", message.message)
+
+
+def msg(client, message: dglab_message, state: AppState) -> bool:
+    """Handle one app message.
+
+    Returns True when channel state may have changed, so the caller can push a
+    strength feedback back to the app.
+    """
+    parts = str(message.message).split("-", 1)
+    if len(parts) < 2:
+        return False
+    message_type, message_content = parts
+    if message_type == "strength":
+        _strength(message_content, state)
+        return True
+    if message_type == "pulse":
+        _pulse(message_content, state)
+        return False
+    if message_type == "clear":
+        _clear(message_content, state)
+        return True
+    if message_type == "feedback":
+        state.push_log("log.app_feedback", {"code": message_content})
+    return False
+
+
+def strength_upload(client, message: str, state: AppState) -> None:
+    client.send(json.dumps({
+        "type": "msg",
+        "clientId": state.client_id,
+        "targetId": state.target_id,
+        "message": message,
+    }))
+
+
+def error(client, message: dglab_message, state: AppState) -> None:
+    raw = str(message.message)
+    if raw.isdigit() and int(raw) in code:
+        raw = code[int(raw)][0]
+    state.last_error = raw
+    state.push_log("log.ws_error", {"error": raw})
+
+
+def _strength(message: str, state: AppState) -> None:
+    raw = message.split("+")
+    if len(raw) >= 4:
+        # App-side sync: strength-A强度+B强度+A上限+B上限
+        state.limit_a = max(0, min(200, int(raw[2])))
+        state.limit_b = max(0, min(200, int(raw[3])))
+        state.strength_a = max(0, min(int(raw[0]), state.limit_a))
+        state.strength_b = max(0, min(int(raw[1]), state.limit_b))
+        state.push_log(
+            "log.app_sync",
+            {
+                "strengthA": state.strength_a,
+                "strengthB": state.strength_b,
+                "limitA": state.limit_a,
+                "limitB": state.limit_b,
+            },
         )
         return
-    if msg in code:
-        err_key = code[msg][0]
-        logger.error(err_key)
-        if hasattr(store, "_state"):
-            store._state.last_error = err_key
-        return
-    logger.error("Unknown heartbeat message: %s", message.message)
-    raise Exception("Unknown heartbeat message: " + str(message.message))
-
-
-def msg(client: WebSocketApp, message: dglab_message, store: local_data):
-    parts = message.message.split("-", 1)
-    if len(parts) < 2:
-        return
-    message_type, message_content = parts[0], parts[1]
-    if message_type == "strength":
-        _strength(message_content, store)
-    elif message_type == "pulse":
-        ratio = 5
-        if hasattr(store, "_state"):
-            ratio = store._state.wave_convert_ratio
-        _pulse(message_content, store, ratio)
-    elif message_type == "clear":
-        _clear(message_content, store)
-
-
-def strength_upload(client: WebSocketApp, message: str, store: local_data):
-    reply = {
-        "type": "msg",
-        "clientId": store.clientId,
-        "targetId": store.targetId,
-        "message": message,
-    }
-    client.send(json.dumps(reply))
-
-
-def break_(client: WebSocketApp, message: dglab_message):
-    raise Exception("Connection broken")
-
-
-def error(client: WebSocketApp, message: dglab_message):
-    pass
-
-
-def response(client: WebSocketApp, message: str, store: local_data):
-    reply = {
-        "type": "msg",
-        "clientId": store.clientId,
-        "targetId": store.targetId,
-        "message": message,
-    }
-    client.send(json.dumps(reply))
-
-
-def _strength(message: str, store: local_data):
-    raw = message.split("+")
     if len(raw) < 3:
         return
     channel, strength_mode, strength = raw[0], raw[1], raw[2]
     value = int(strength)
     logger.debug("Strength changing: %s--%s--%s", channel, strength_mode, strength)
-
     if channel == "1":
-        if strength_mode == "0":
-            store.channelAStrength = max(0, store.channelAStrength - value)
-        elif strength_mode == "1":
-            store.channelAStrength = min(store.limitA, store.channelAStrength + value)
-        elif strength_mode == "2":
-            store.channelAStrength = max(0, min(store.limitA, value))
+        state.set_strength("A", value, _op_mode(strength_mode))
     elif channel == "2":
-        if strength_mode == "0":
-            store.channelBStrength = max(0, store.channelBStrength - value)
-        elif strength_mode == "1":
-            store.channelBStrength = min(store.limitB, store.channelBStrength + value)
-        elif strength_mode == "2":
-            store.channelBStrength = max(0, min(store.limitB, value))
+        state.set_strength("B", value, _op_mode(strength_mode))
 
 
-def _pulse(message: str, store: local_data, wave_convert_ratio: int = 5):
-    channel = message.split(":")[0]
-    wave_set = json.loads(message.split(":", 1)[1])
-    logger.debug("Pulse changing: %s--%s", channel, wave_set)
-    dglab_wave_handler(store, wave_set, channel, wave_convert_ratio)
+def _op_mode(strength_mode: str) -> str:
+    return {"0": "sub", "1": "add", "2": "set"}.get(strength_mode, "set")
 
 
-def _clear(message: str, store: local_data):
-    channel = message
-    if channel == "1":
-        store.channelAWave = [(5, 95, 20)]
-        store.channelAStrength = 0
-    elif channel == "2":
-        store.channelBWave = [(5, 95, 20)]
-        store.channelBStrength = 0
+def _pulse(message: str, state: AppState) -> None:
+    channel, _, wave_json = message.partition(":")
+    wave_set = json.loads(wave_json)
+    logger.debug("Pulse changing: %s", channel)
+    dglab_wave_handler(state, wave_set, channel, state.wave_convert_ratio)
+
+
+def _clear(message: str, state: AppState) -> None:
+    if message == "1":
+        state.wave_a = list(DEFAULT_WAVE)
+        state.strength_a = 0
+    elif message == "2":
+        state.wave_b = list(DEFAULT_WAVE)
+        state.strength_b = 0

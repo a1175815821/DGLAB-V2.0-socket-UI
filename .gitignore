@@ -150,3 +150,6 @@ cython_debug/
 # Project runtime artifacts
 debug.log
 *.zip
+
+# Local runtime config (may contain your socket session URL)
+config.yaml

@@ -78,6 +78,10 @@
   "log.ws_bad_message": "Bad WS message: {error}",
   "log.ws_bound": "WS bound successfully",
   "log.bind_error": "Bind error: {error}",
+  "log.app_sync": "App sync: A={strengthA} B={strengthB} · limits {limitA}/{limitB}",
+  "log.app_feedback": "App feedback button: {code}",
+  "log.peer_broken": "Peer unbound, waiting for re-bind",
+  "log.ws_handler_error": "Message handler error: {error}",
 
   "error.peer_disconnected": "Peer client disconnected",
   "error.invalid_client_id": "QR code has no valid client ID",
@@ -95,6 +99,8 @@
   "error.image_too_large": "Image too large (max 12MB)",
   "error.not_image": "Not an image file",
   "error.channel": "channel must be A or B",
+  "error.wave_invalid": "Invalid wave params (need X ≥ 1, Y,Z ≥ 0)",
+  "error.cross_origin": "Cross-origin request rejected",
   "error.frontend_missing": "Frontend not found",
   "error.connect_failed": "connect failed"
 }
